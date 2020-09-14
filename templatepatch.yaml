@@ -1,0 +1,186 @@
+---
+- name: Win Template Patch FOR VC
+  gather_facts: no
+  hosts: localhost
+  tasks:
+    - set_fact:
+        vm_name: "{{ wintemp }}"
+        datacenter: "Datacenter"
+
+    - name: "Convert {{ vm_name }} to vm"
+      vmware_guest:
+        hostname: "{{ hostname }}"
+        username: "{{ user1 }}"
+        password: "{{ pass1 }}"
+        validate_certs: no
+        datacenter: "{{ datacenter }}"
+        state: present
+        folder: "/{{datacenter}}/vm"
+        name: "{{ vm_name }}"
+        is_template: False
+        resource_pool: ResourcePool
+
+    - name: sleep for 30 seconds and continue with play
+      wait_for:
+        timeout: 30
+      delegate_to: localhost
+
+
+    - name: Set the state of a virtual machine to poweron
+      vmware_guest_powerstate:
+        hostname: "{{ hostname }}"
+        username: "{{ user1 }}"
+        password: "{{ pass1 }}"
+        validate_certs: no
+        folder: "/{{datacenter}}/vm/"
+        name: "{{ vm_name }}"
+        state: powered-on
+      delegate_to: localhost
+      register: deploy
+
+    - name: sleep for 60 seconds and continue with play
+      wait_for:
+        timeout: 60
+      delegate_to: localhost
+
+    - name: Configure IP address via vmware_vm_shell
+      local_action:
+        module: vmware_vm_shell
+        hostname: "{{ hostname }}"
+        username: "{{ user1 }}"
+        password: "{{ pass1 }}"
+        vm_username: Administrator
+        vm_password: 'PASSWORD'
+        vm_id: "{{ wintemp }}"
+        vm_shell: 'c:\windows\system32\windowspowershell\v1.0\powershell.exe'
+        vm_shell_args: '-command "(new-netipaddress -InterfaceAlias Ethernet0 -IPAddress 10.72.0.12 -PrefixLength 23 -DefaultGateway 10.72.0.1)"'
+        wait_for_process: true
+
+    - name: sleep for 30 seconds and continue with play
+      wait_for:
+        timeout: 30
+      delegate_to: localhost
+
+    - name: add converted template to temporary hosts
+      add_host:
+        name: '10.72.0.12'
+        groups: templates
+        ansible_user: "administrator"
+        ansible_password: 'PASSWORD'
+        ansible_port: 5986
+        ansible_connection: winrm
+        ansible_winrm_server_cert_validation: ignore
+      delegate_to: localhost
+
+
+- name: install windows updates
+  hosts: templates
+  gather_facts: False
+  tasks:
+  - set_fact:
+      vm_name: "{{ wintemp }}"
+      datacenter: "Datacenter"
+
+
+  - name: attempt to install updates
+    block:
+      - name: Search-only, return list of found updates (if any)
+        win_updates:
+          category_names:
+            - SecurityUpdates
+            - CriticalUpdates
+          state: searched
+        register: result
+
+      - name:
+        debug:
+          msg: "Found update count: {{ result.found_update_count }}"
+
+      - set_fact:
+          install: False
+        when: result.found_update_count == 0
+
+      - set_fact:
+          install: True
+        when: result.found_update_count > 0
+
+      - name: install all security, critical, and rollup updates
+        win_updates:
+          category_names:
+            - SecurityUpdates
+            - CriticalUpdates
+          reboot: yes
+          reboot_timeout: 3600
+        register: installed
+        when: install
+
+      - name: show installed updates
+        debug:
+          msg: "{{ installed.updates | to_nice_json }}"
+        when: install
+
+
+      - name: wait up to 2 hours for system to become reachable over WinRM
+        wait_for_connection:
+          timeout: 7200
+        register: time
+        when: install
+
+      - name: show reboot time
+        debug:
+          msg: "Reboot time was {{ time.elapsed }} seconds."
+        when: install
+
+    rescue:
+
+      - name: Error
+        debug:
+          msg: "I caught an error. Please report exception to system administrator."
+
+
+  - name: Configure IP address via vmware_vm_shell
+    local_action:
+       module: vmware_vm_shell
+       hostname: "{{ hostname }}"
+       username: "{{ user1 }}"
+       password: "{{ pass1 }}"
+       vm_username: Administrator
+       vm_password: 'PASSWORD'
+       vm_id: "{{ wintemp }}"
+       vm_shell: 'c:\windows\system32\windowspowershell\v1.0\powershell.exe'
+       vm_shell_args: '{{ item }}'
+       wait_for_process: true
+    with_items:
+          - '-command "(Remove-NetRoute -INterfaceAlias "Ethernet0" -AddressFamily IPv4 -Confirm:$false)"'
+          - '-command "(Set-NetIPInterface -InterfaceAlias "Ethernet0" -Dhcp Enabled)"'
+
+  - name: Set the state of a virtual machine to poweroff
+    vmware_guest_powerstate:
+      hostname: "{{ hostname }}"
+      username: "{{ user1 }}"
+      password: "{{ pass1 }}"
+      validate_certs: no
+      folder: "/{{datacenter}}/vm/"
+      name: "{{ vm_name }}"
+      state: powered-off
+    delegate_to: localhost
+    register: deploy
+
+  - name: sleep for 90 seconds and continue with play
+    wait_for:
+      timeout: 90
+    delegate_to: localhost
+
+  - name: "Convert {{ vm_name }} to vm"
+    vmware_guest:
+      hostname: "{{ hostname }}"
+      username: "{{ user1 }}"
+      password: "{{ pass1 }}"
+      validate_certs: no
+      datacenter: "{{ datacenter }}"
+      state: present
+      folder: "/{{datacenter}}/vm"
+      name: "{{ vm_name }}"
+      is_template: True
+      resource_pool: Compute-ResourcePool
+    delegate_to: localhost
